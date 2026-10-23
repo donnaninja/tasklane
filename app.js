@@ -1,6 +1,6 @@
 /* Supabase connection. Both values are public by design: the database only lets signed-in team members in. */
-const SUPABASE_URL = 'PASTE_PROJECT_URL';
-const SUPABASE_ANON_KEY = 'PASTE_ANON_KEY';
+const SUPABASE_URL = 'https://lfreyywzczqxvukjscyf.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_o5zZ84A4iunvzYC4Lejn7Q_4IShm3Sk';
 
 const I = {
   check: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg>',
