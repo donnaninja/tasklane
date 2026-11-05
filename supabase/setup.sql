@@ -21,7 +21,7 @@ create table if not exists public.projects (
 
 create table if not exists public.tasks (
   id uuid primary key default gen_random_uuid(),
-  project_id uuid not null references public.projects (id) on delete cascade,
+  project_id uuid references public.projects (id) on delete cascade,
   title text not null,
   status text not null default 'todo' check (status in ('todo', 'doing', 'done')),
   priority text not null default 'medium' check (priority in ('low', 'medium', 'high')),
@@ -29,6 +29,7 @@ create table if not exists public.tasks (
   due date,
   description text not null default '',
   subtasks jsonb not null default '[]'::jsonb,
+  created_by uuid default auth.uid() references public.profiles (id) on delete set null,
   created_at timestamptz not null default now()
 );
 create index if not exists tasks_project_id_idx on public.tasks (project_id);
@@ -40,6 +41,10 @@ create table if not exists public.templates (
   tasks jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now()
 );
+
+-- Updates for databases created by an earlier version of this script
+alter table public.tasks alter column project_id drop not null;
+alter table public.tasks add column if not exists created_by uuid default auth.uid() references public.profiles (id) on delete set null;
 
 -- Create a profile automatically for every new login
 create or replace function public.handle_new_user()

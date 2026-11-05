@@ -15,6 +15,7 @@ const I = {
   sub: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 3v6a2 2 0 002 2h6M10 9l2 2-2 2"/></svg>',
   save: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/><path d="M5 2.5v4h6v-4"/></svg>',
   info: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v4M8 4.9v.1"/></svg>',
+  send: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8h9M8.5 4.5L12 8l-3.5 3.5"/><path d="M14 3v10"/></svg>',
   logo: '<svg viewBox="0 0 16 16" fill="none" stroke="var(--on-accent)" stroke-width="2" stroke-linecap="round"><path d="M3 5h7M3 8h10M3 11h5"/></svg>'
 };
 const STATUSES = [['todo', 'To do'], ['doing', 'In progress'], ['done', 'Done']];
@@ -48,8 +49,8 @@ try { Object.assign(ui, JSON.parse(localStorage.getItem(LOCAL_KEY + '-ui')) || {
 
 const fromProject = r => ({ id: r.id, name: r.name, color: r.color, desc: r.description || '' });
 const toProject = p => ({ id: p.id, name: p.name, color: p.color, description: p.desc || '' });
-const fromTask = r => ({ id: r.id, projectId: r.project_id, title: r.title, status: r.status, priority: r.priority, assignee: r.assignee || '', due: r.due || '', desc: r.description || '', subtasks: r.subtasks || [], created: r.created_at });
-const toTask = t => ({ id: t.id, project_id: t.projectId, title: t.title, status: t.status, priority: t.priority, assignee: t.assignee || null, due: t.due || null, description: t.desc || '', subtasks: t.subtasks });
+const fromTask = r => ({ id: r.id, projectId: r.project_id || '', createdBy: r.created_by || '', title: r.title, status: r.status, priority: r.priority, assignee: r.assignee || '', due: r.due || '', desc: r.description || '', subtasks: r.subtasks || [], created: r.created_at });
+const toTask = t => ({ id: t.id, project_id: t.projectId || null, title: t.title, status: t.status, priority: t.priority, assignee: t.assignee || null, due: t.due || null, description: t.desc || '', subtasks: t.subtasks });
 const fromTemplate = r => ({ id: r.id, name: r.name, desc: r.description || '', tasks: r.tasks || [] });
 const toTemplate = t => ({ id: t.id, name: t.name, description: t.desc || '', tasks: t.tasks });
 const fromPerson = r => ({ id: r.id, name: r.name || r.email || 'Teammate', color: r.color, email: r.email });
@@ -67,6 +68,11 @@ async function loadAll() {
 }
 function syncFailed(error) {
   console.error(error);
+  if (error && error.code === '23502' && /project_id/.test(error.message || '')) {
+    ui.syncError = 'Tasks without a project need a one-time database update.';
+    toast('Ask your Tasklane admin to run the database update for tasks without a project.');
+    return render();
+  }
   ui.syncError = 'Last change was not saved. Check your connection and refresh.';
   toast("That change wasn't saved. Check your internet connection, then refresh the page.");
   render();
@@ -147,6 +153,7 @@ function renderSide() {
     <div class="brand"><span class="brand-mark">${I.logo}</span>Tasklane</div>
     <nav class="nav">
       ${nav('home', I.home, 'My tasks', `<span class="count">${open}</span>`)}
+      ${nav('assigned', I.send, 'Assigned by me', `<span class="count">${S.tasks.filter(t => t.createdBy === ME && t.assignee !== ME && t.status !== 'done').length}</span>`)}
       ${nav('templates', I.tpl, 'Templates')}
       ${nav('connect', I.plug, 'Connect website')}
     </nav>
@@ -176,7 +183,8 @@ function rowHtml(t, showProject) {
     <button class="check ${t.status === 'done' ? 'on' : ''}" data-act="toggle" data-id="${t.id}" aria-label="Mark complete">${I.check}</button>
     <div class="row-title"><span class="t">${esc(t.title)}</span>
       ${t.subtasks.length ? `<span class="meta-sub">${I.sub}${done}/${t.subtasks.length}</span>` : ''}
-      ${showProject && p ? `<span class="proj-chip"><span class="dot" style="background:${esc(p.color)}"></span>${esc(p.name)}</span>` : ''}</div>
+      ${showProject && p ? `<span class="proj-chip"><span class="dot" style="background:${esc(p.color)}"></span>${esc(p.name)}</span>` : ''}
+      ${showProject && t.createdBy && t.createdBy !== ME && person(t.createdBy) && t.assignee === ME ? `<span class="proj-chip">from ${esc(person(t.createdBy).name.split(' ')[0])}</span>` : ''}</div>
     <div class="row-meta">${t.priority !== 'low' && t.status !== 'done' ? `<span class="chip ${t.priority}">${t.priority === 'high' ? 'High' : 'Medium'}</span>` : ''}
       ${showProject ? `<span class="chip ${t.status}">${STATUS_NAME[t.status]}</span>` : ''}${avatar(t.assignee)}${dueHtml(t)}</div>
   </div>`;
@@ -195,10 +203,19 @@ function renderHome() {
   const today = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
   const empty = S.projects.length
     ? '<div class="empty"><b>All clear</b>Nothing is assigned to you right now.</div>'
-    : `<div class="empty"><b>Welcome to Tasklane</b><p style="margin:0 0 14px">Start your first project. Pick a template to fill it with tasks automatically.</p><button class="btn primary" data-act="new-project">${I.plus}Create your first project</button></div>`;
-  return header('My tasks', `${today} · ${mine.length} open task${mine.length === 1 ? '' : 's'} assigned to you`, `<button class="btn primary" data-act="new-project">${I.plus}New project</button>`) +
+    : `<div class="empty"><b>Welcome to Tasklane</b><p style="margin:0 0 14px">Add a task, or start a project from a template.</p><button class="btn primary" data-act="new-task">${I.plus}Add task</button> <button class="btn" data-act="new-project">${I.plus}New project</button></div>`;
+  return header('My tasks', `${today} · ${mine.length} open task${mine.length === 1 ? '' : 's'} assigned to you`, `<button class="btn" data-act="new-project">${I.plus}New project</button><button class="btn primary" data-act="new-task">${I.plus}Add task</button>`) +
     `<div class="content">${groups.length ? groups.map(([name, list]) => `<div class="section"><div class="section-head">${name}<span class="n">${list.length}</span></div>
       <div class="rows">${list.map(t => rowHtml(t, true)).join('')}</div></div>`).join('') : empty}</div>`;
+}
+
+function renderAssigned() {
+  const mine = S.tasks.filter(t => t.createdBy === ME && t.assignee !== ME).sort(byDue);
+  const groups = [['Open', mine.filter(t => t.status !== 'done')], ['Completed', mine.filter(t => t.status === 'done')]].filter(g => g[1].length);
+  return header('Assigned by me', 'Tasks you created for other people, and where they stand.', `<button class="btn primary" data-act="new-task">${I.plus}Add task</button>`) +
+    `<div class="content">${groups.length ? groups.map(([name, list]) => `<div class="section"><div class="section-head">${name}<span class="n">${list.length}</span></div>
+      <div class="rows">${list.map(t => rowHtml(t, true)).join('')}</div></div>`).join('')
+      : `<div class="empty"><b>Nothing assigned yet</b><p style="margin:0 0 14px">Tasks you create for teammates show up here, so you can see when they're done.</p><button class="btn primary" data-act="new-task">${I.plus}Add task</button></div>`}</div>`;
 }
 
 function renderProject() {
@@ -300,7 +317,7 @@ function renderLayer() {
     const p = project(t.projectId);
     html += `<div class="scrim" data-act="close-task"></div><aside class="drawer" role="dialog" aria-label="Task details">
       <div class="drawer-head"><button class="btn sm ${t.status === 'done' ? 'primary' : ''}" data-act="toggle" data-id="${t.id}">${I.check}${t.status === 'done' ? 'Completed' : 'Mark complete'}</button>
-        <span class="proj-chip" style="margin-left:6px"><span class="dot" style="background:${esc(p?.color)}"></span>${esc(p?.name)}</span>
+        <span class="proj-chip" style="margin-left:6px">${p ? `<span class="dot" style="background:${esc(p.color)}"></span>${esc(p.name)}` : 'No project'}</span>
         <button class="icon-btn" style="margin-left:auto" data-act="close-task" aria-label="Close">${I.x}</button></div>
       <div class="drawer-body">
         <textarea class="title-input" id="d-title" rows="1" data-field="title">${esc(t.title)}</textarea>
@@ -309,7 +326,8 @@ function renderLayer() {
           <label for="d-due">Due date</label><input class="field" type="date" id="d-due" data-field="due" value="${t.due}">
           <label for="d-status">Status</label><select class="field" id="d-status" data-field="status">${STATUSES.map(([k, n]) => `<option value="${k}" ${k === t.status ? 'selected' : ''}>${n}</option>`).join('')}</select>
           <label for="d-priority">Priority</label><select class="field" id="d-priority" data-field="priority">${['low', 'medium', 'high'].map(k => `<option value="${k}" ${k === t.priority ? 'selected' : ''}>${k[0].toUpperCase() + k.slice(1)}</option>`).join('')}</select>
-          <label for="d-project">Project</label><select class="field" id="d-project" data-field="projectId">${S.projects.map(x => `<option value="${x.id}" ${x.id === t.projectId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+          ${t.createdBy && person(t.createdBy) ? `<label>Created by</label><span>${esc(person(t.createdBy).name)}</span>` : ''}
+          <label for="d-project">Project</label><select class="field" id="d-project" data-field="projectId"><option value="">No project</option>${S.projects.map(x => `<option value="${x.id}" ${x.id === t.projectId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
         </div>
         <div><div class="block-label"><label for="d-desc">Description</label></div><textarea class="field" id="d-desc" data-field="desc" placeholder="Add details, links or notes…">${esc(t.desc)}</textarea></div>
         <div><div class="block-label">Subtasks <span>${t.subtasks.filter(s => s.done).length}/${t.subtasks.length}</span></div>
@@ -328,6 +346,20 @@ function renderLayer() {
         ${S.templates.map(tp => `<label class="choice"><input type="radio" name="tpl" value="${tp.id}" ${ui.modalTpl === tp.id ? 'checked' : ''}><span><b>${esc(tp.name)}</b><small>${tp.tasks.length} tasks · ${esc(tp.desc || '')}</small></span></label>`).join('')}
       </div></div>
       <div class="modal-actions"><button type="button" class="btn" data-act="close-modal">Cancel</button><button class="btn primary">Create project</button></div></form></div>`;
+  }
+  if (ui.modal === 'task') {
+    const pid = ui.view === 'project' ? ui.projectId : '';
+    html += `<div class="modal-wrap" data-act="close-modal-bg"><form class="modal" data-form="task">
+      <h2>Add task</h2>
+      <div class="form-grid"><label for="nk-title">Task</label><input class="field" id="nk-title" name="title" required placeholder="e.g. Update the homepage banner" autocomplete="off"></div>
+      <div class="fields">
+        <label for="nk-assignee">Assign to</label><select class="field" id="nk-assignee" name="assignee"><option value="">Unassigned</option>${S.people.map(x => `<option value="${x.id}" ${x.id === ME ? 'selected' : ''}>${esc(x.name)}${x.id === ME ? ' (me)' : ''}</option>`).join('')}</select>
+        <label for="nk-due">Due date</label><input class="field" type="date" id="nk-due" name="due">
+        <label for="nk-priority">Priority</label><select class="field" id="nk-priority" name="priority"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select>
+        <label for="nk-project">Project</label><select class="field" id="nk-project" name="project"><option value="">No project</option>${S.projects.map(x => `<option value="${x.id}" ${x.id === pid ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+      </div>
+      <div class="form-grid"><label for="nk-desc">Details <span class="hint">(optional)</span></label><textarea class="field" id="nk-desc" name="desc" placeholder="Links, notes or instructions…" style="min-height:70px"></textarea></div>
+      <div class="modal-actions"><button type="button" class="btn" data-act="close-modal">Cancel</button><button class="btn primary">Add task</button></div></form></div>`;
   }
   if (ui.modal === 'template') {
     html += `<div class="modal-wrap" data-act="close-modal-bg"><form class="modal" data-form="template">
@@ -354,7 +386,7 @@ function render(keepLayer = false) {
   const main = document.getElementById('main');
   const scroll = main.scrollTop;
   if (ui.view === 'project' && !project(ui.projectId)) ui.view = 'home';
-  main.innerHTML = ui.view === 'project' ? renderProject() : ui.view === 'templates' ? renderTemplates() : ui.view === 'connect' ? renderConnect() : renderHome();
+  main.innerHTML = ui.view === 'project' ? renderProject() : ui.view === 'assigned' ? renderAssigned() : ui.view === 'templates' ? renderTemplates() : ui.view === 'connect' ? renderConnect() : renderHome();
   main.scrollTop = scroll;
   if (!keepLayer) renderLayer();
   saveLocal();
@@ -362,7 +394,7 @@ function render(keepLayer = false) {
 
 /* ---------- Actions ---------- */
 function addTask(projectId, title, status, extra = {}) {
-  const t = { id: uid(), projectId, title, status, assignee: ME, due: '', priority: 'medium', desc: '', subtasks: [], created: new Date().toISOString(), ...extra };
+  const t = { id: uid(), projectId, title, status, assignee: ME, due: '', priority: 'medium', desc: '', subtasks: [], created: new Date().toISOString(), createdBy: ME, ...extra };
   S.tasks.push(t); notify('task.created', t); saveTask(t); return t;
 }
 function setStatus(t, status) {
@@ -401,6 +433,7 @@ document.addEventListener('click', e => {
     case 'new-project': openModal('project'); render(); document.getElementById('np-name').focus(); return;
     case 'np-color': { const f = el.closest('form'); ui.modalName = f.elements.name.value; ui.modalTpl = f.elements.tpl.value; ui.modalColor = el.dataset.color; break; }
     case 'use-template': openModal('project', { modalTpl: id }); render(); document.getElementById('np-name').focus(); return;
+    case 'new-task': openModal('task'); render(); document.getElementById('nk-title').focus(); return;
     case 'new-template': openModal('template'); render(); document.getElementById('nt-name').focus(); return;
     case 'edit-me': openModal('me', { modalColor: person(ME)?.color }); render(); document.getElementById('me-name').focus(); return;
     case 'me-color': { const f = el.closest('form'); const n = f.elements.name.value; ui.modalColor = el.dataset.color; render(); document.getElementById('me-name').value = n; return; }
@@ -447,6 +480,13 @@ document.addEventListener('submit', async e => {
     if (!project(L.widget.projectId)) L.widget.projectId = ui.projectId;
     toast(tpl ? `Created ${name} with ${tpl.tasks.length} tasks` : `Created ${name}`);
     render(); await p; return;
+  }
+  if (kind === 'task') {
+    const assignee = f.elements.assignee.value;
+    addTask(f.elements.project.value, v('title'), 'todo', { assignee, due: f.elements.due.value, priority: f.elements.priority.value, desc: v('desc'), createdBy: ME });
+    ui.modal = null;
+    const who = assignee === ME ? 'you' : person(assignee)?.name || 'nobody yet';
+    toast(`Task added for ${who}${f.elements.due.value ? `, due ${dueLabel(f.elements.due.value)}` : ''}`);
   }
   if (kind === 'template') {
     const tasks = [];
