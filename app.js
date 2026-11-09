@@ -39,7 +39,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const configured = /^https:\/\//.test(SUPABASE_URL) && SUPABASE_ANON_KEY.length > 40;
 const db = configured && window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 let ME = null;
-let S = { people: [], projects: [], tasks: [], templates: [] };
+let S = { people: [], projects: [], tasks: [], templates: [], workspaces: [] };
 // Website and developer settings stay in this browser until they are wired to the server.
 let L;
 try { L = JSON.parse(localStorage.getItem(LOCAL_KEY)) || null; } catch (e) { L = null; }
@@ -47,12 +47,14 @@ if (!L) L = { webhooks: [], apiKey: 'tl_live_' + Math.random().toString(36).slic
 const ui = { view: 'home', projectId: null, mode: 'list', openTask: null, armDelete: false, sideOpen: false, log: [], syncError: '' };
 try { Object.assign(ui, JSON.parse(localStorage.getItem(LOCAL_KEY + '-ui')) || {}); } catch (e) {}
 
-const fromProject = r => ({ id: r.id, name: r.name, color: r.color, desc: r.description || '' });
-const toProject = p => ({ id: p.id, name: p.name, color: p.color, description: p.desc || '' });
-const fromTask = r => ({ id: r.id, projectId: r.project_id || '', createdBy: r.created_by || '', title: r.title, status: r.status, priority: r.priority, assignee: r.assignee || '', due: r.due || '', desc: r.description || '', subtasks: r.subtasks || [], created: r.created_at });
-const toTask = t => ({ id: t.id, project_id: t.projectId || null, title: t.title, status: t.status, priority: t.priority, assignee: t.assignee || null, due: t.due || null, description: t.desc || '', subtasks: t.subtasks });
-const fromTemplate = r => ({ id: r.id, name: r.name, desc: r.description || '', tasks: r.tasks || [] });
-const toTemplate = t => ({ id: t.id, name: t.name, description: t.desc || '', tasks: t.tasks });
+const fromProject = r => ({ id: r.id, name: r.name, color: r.color, desc: r.description || '', workspaceId: r.workspace_id || '' });
+// workspace_id is only sent once the workspaces database update has been run
+const withWs = (row, id) => S.workspaces.length ? { ...row, workspace_id: id || null } : row;
+const toProject = p => withWs({ id: p.id, name: p.name, color: p.color, description: p.desc || '' }, p.workspaceId);
+const fromTask = r => ({ id: r.id, projectId: r.project_id || '', workspaceId: r.workspace_id || '', createdBy: r.created_by || '', title: r.title, status: r.status, priority: r.priority, assignee: r.assignee || '', due: r.due || '', desc: r.description || '', subtasks: r.subtasks || [], created: r.created_at });
+const toTask = t => withWs({ id: t.id, project_id: t.projectId || null, title: t.title, status: t.status, priority: t.priority, assignee: t.assignee || null, due: t.due || null, description: t.desc || '', subtasks: t.subtasks }, t.workspaceId);
+const fromTemplate = r => ({ id: r.id, name: r.name, desc: r.description || '', tasks: r.tasks || [], workspaceId: r.workspace_id || '' });
+const toTemplate = t => withWs({ id: t.id, name: t.name, description: t.desc || '', tasks: t.tasks }, t.workspaceId);
 const fromPerson = r => ({ id: r.id, name: r.name || r.email || 'Teammate', color: r.color, email: r.email });
 
 async function loadAll() {
@@ -64,7 +66,11 @@ async function loadAll() {
   ]);
   const err = pe.error || pr.error || ta.error || te.error;
   if (err) throw err;
-  S = { people: pe.data.map(fromPerson), projects: pr.data.map(fromProject), tasks: ta.data.map(fromTask), templates: te.data.map(fromTemplate) };
+  const ws = await db.from('workspaces').select('*').order('position').order('created_at');
+  if (ws.error) console.warn('Workspaces not set up yet', ws.error.message);
+  S = { people: pe.data.map(fromPerson), projects: pr.data.map(fromProject), tasks: ta.data.map(fromTask), templates: te.data.map(fromTemplate),
+    workspaces: ws.error ? [] : ws.data.map(r => ({ id: r.id, name: r.name, color: r.color })) };
+  if (S.workspaces.length && !S.workspaces.some(w => w.id === ui.workspace)) ui.workspace = S.workspaces[0].id;
 }
 function syncFailed(error) {
   console.error(error);
@@ -96,11 +102,18 @@ function isTyping() { const a = document.activeElement; return a && (a.tagName =
 document.addEventListener('focusout', () => setTimeout(() => { if (renderWhenIdle && !isTyping()) { renderWhenIdle = false; render(); } }, 0));
 
 function saveLocal() {
-  try { localStorage.setItem(LOCAL_KEY, JSON.stringify(L)); localStorage.setItem(LOCAL_KEY + '-ui', JSON.stringify({ view: ui.view, projectId: ui.projectId, mode: ui.mode })); } catch (e) {}
+  try { localStorage.setItem(LOCAL_KEY, JSON.stringify(L)); localStorage.setItem(LOCAL_KEY + '-ui', JSON.stringify({ view: ui.view, projectId: ui.projectId, mode: ui.mode, workspace: ui.workspace })); } catch (e) {}
 }
 const person = id => S.people.find(p => p.id === id);
 const project = id => S.projects.find(p => p.id === id);
 const task = id => S.tasks.find(t => t.id === id);
+/* Workspaces: each business sees only its own projects, tasks and templates. */
+const curWs = () => S.workspaces.find(w => w.id === ui.workspace);
+const taskWs = t => project(t.projectId)?.workspaceId || t.workspaceId;
+const inWs = id => !S.workspaces.length || id === ui.workspace;
+const wsProjects = () => S.projects.filter(p => inWs(p.workspaceId));
+const wsTasks = () => S.tasks.filter(t => inWs(taskWs(t)));
+const wsTemplates = () => S.templates.filter(t => !t.workspaceId || inWs(t.workspaceId));
 const initials = n => n.split(/\s+/).filter(Boolean).map(w => w[0]).join('').slice(0, 2).toUpperCase() || '?';
 function avatar(id) { const p = person(id); return p ? `<span class="avatar" style="background:${esc(p.color)}" title="${esc(p.name)}">${esc(initials(p.name))}</span>` : '<span class="avatar none" title="Unassigned">?</span>'; }
 function dueHtml(t) {
@@ -137,7 +150,6 @@ async function start(session) {
   try { await loadAll(); } catch (e) { console.error(e); gate(`<h1>Can’t load tasks</h1><div class="gate-error">${esc(e.message || e)}</div><p>If this is a new setup, run the database setup in Supabase first. Otherwise refresh the page.</p><button class="btn" data-act="sign-out">Sign out</button>`); return; }
   if (!person(ME)) S.people.push({ id: ME, name: session.user.email, color: COLORS[0], email: session.user.email });
   if (ui.view === 'project' && !project(ui.projectId)) ui.view = 'home';
-  if (!project(L.widget.projectId)) L.widget.projectId = S.projects[0]?.id || '';
   document.getElementById('gate').hidden = true; document.getElementById('app').hidden = false;
   render();
   db.channel('tasklane').on('postgres_changes', { event: '*', schema: 'public' }, scheduleReload).subscribe();
@@ -145,23 +157,27 @@ async function start(session) {
 
 /* ---------- Sidebar ---------- */
 function renderSide() {
-  const open = S.tasks.filter(t => t.assignee === ME && t.status !== 'done').length;
+  const open = wsTasks().filter(t => t.assignee === ME && t.status !== 'done').length;
   const me = person(ME);
   const nav = (view, icon, label, extra = '') => `<button class="nav-item ${ui.view === view ? 'active' : ''}" data-act="go" data-view="${view}">${icon}<span>${label}</span>${extra}</button>`;
   document.getElementById('side').className = 'side' + (ui.sideOpen ? ' open' : '');
   document.getElementById('side').innerHTML = `
-    <div class="brand"><span class="brand-mark">${I.logo}</span>Tasklane</div>
+    <div class="brand"><span class="brand-mark" style="${curWs() ? `background:${esc(curWs().color)}` : ''}">${I.logo}</span>Tasklane</div>
+    ${S.workspaces.length > 1 ? `<div class="ws-switch" role="tablist" aria-label="Business">${S.workspaces.map(w => {
+      const n = S.tasks.filter(t => taskWs(t) === w.id && t.assignee === ME && t.status !== 'done').length;
+      return `<button class="ws-tab ${w.id === ui.workspace ? 'on' : ''}" role="tab" aria-selected="${w.id === ui.workspace}" data-act="ws" data-id="${w.id}" style="--ws:${esc(w.color)}"><span class="dot"></span><span class="ws-name">${esc(w.name)}</span>${n ? `<span class="ws-n">${n}</span>` : ''}</button>`;
+    }).join('')}</div>` : ''}
     <nav class="nav">
       ${nav('home', I.home, 'My tasks', `<span class="count">${open}</span>`)}
-      ${nav('assigned', I.send, 'Assigned by me', `<span class="count">${S.tasks.filter(t => t.createdBy === ME && t.assignee !== ME && t.status !== 'done').length}</span>`)}
+      ${nav('assigned', I.send, 'Assigned by me', `<span class="count">${wsTasks().filter(t => t.createdBy === ME && t.assignee !== ME && t.status !== 'done').length}</span>`)}
       ${nav('templates', I.tpl, 'Templates')}
       ${nav('connect', I.plug, 'Connect website')}
     </nav>
     <nav class="nav">
       <div class="nav-label">Projects <button class="icon-btn" data-act="new-project" title="New project" aria-label="New project">${I.plus}</button></div>
-      ${S.projects.map(p => `<button class="nav-item ${ui.view === 'project' && ui.projectId === p.id ? 'active' : ''}" data-act="open-project" data-id="${p.id}">
+      ${wsProjects().map(p => `<button class="nav-item ${ui.view === 'project' && ui.projectId === p.id ? 'active' : ''}" data-act="open-project" data-id="${p.id}">
         <span class="dot" style="background:${esc(p.color)}"></span><span>${esc(p.name)}</span><span class="count">${S.tasks.filter(t => t.projectId === p.id && t.status !== 'done').length}</span></button>`).join('')}
-      ${S.projects.length ? '' : '<p class="hint" style="padding:0 8px">No projects yet.</p>'}
+      ${wsProjects().length ? '' : '<p class="hint" style="padding:0 8px">No projects yet.</p>'}
     </nav>
     <div class="side-foot">
       ${ui.syncError ? `<span class="sync err">${esc(ui.syncError)}</span>` : '<span class="sync">Saved for your whole team</span>'}
@@ -192,7 +208,7 @@ function rowHtml(t, showProject) {
 const byDue = (a, b) => (a.due || '9999') < (b.due || '9999') ? -1 : (a.due || '9999') > (b.due || '9999') ? 1 : 0;
 
 function renderHome() {
-  const mine = S.tasks.filter(t => t.assignee === ME && t.status !== 'done').sort(byDue);
+  const mine = wsTasks().filter(t => t.assignee === ME && t.status !== 'done').sort(byDue);
   const groups = [
     ['Overdue', mine.filter(t => t.due && dayDiff(t.due) < 0)],
     ['Today and tomorrow', mine.filter(t => t.due && dayDiff(t.due) >= 0 && dayDiff(t.due) <= 1)],
@@ -201,16 +217,16 @@ function renderHome() {
     ['No due date', mine.filter(t => !t.due)]
   ].filter(g => g[1].length);
   const today = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
-  const empty = S.projects.length
+  const empty = wsProjects().length
     ? '<div class="empty"><b>All clear</b>Nothing is assigned to you right now.</div>'
     : `<div class="empty"><b>Welcome to Tasklane</b><p style="margin:0 0 14px">Add a task, or start a project from a template.</p><button class="btn primary" data-act="new-task">${I.plus}Add task</button> <button class="btn" data-act="new-project">${I.plus}New project</button></div>`;
-  return header('My tasks', `${today} · ${mine.length} open task${mine.length === 1 ? '' : 's'} assigned to you`, `<button class="btn" data-act="new-project">${I.plus}New project</button><button class="btn primary" data-act="new-task">${I.plus}Add task</button>`) +
+  return header('My tasks', `${curWs() ? esc(curWs().name) + ' · ' : ''}${today} · ${mine.length} open task${mine.length === 1 ? '' : 's'} assigned to you`, `<button class="btn" data-act="new-project">${I.plus}New project</button><button class="btn primary" data-act="new-task">${I.plus}Add task</button>`) +
     `<div class="content">${groups.length ? groups.map(([name, list]) => `<div class="section"><div class="section-head">${name}<span class="n">${list.length}</span></div>
       <div class="rows">${list.map(t => rowHtml(t, true)).join('')}</div></div>`).join('') : empty}</div>`;
 }
 
 function renderAssigned() {
-  const mine = S.tasks.filter(t => t.createdBy === ME && t.assignee !== ME).sort(byDue);
+  const mine = wsTasks().filter(t => t.createdBy === ME && t.assignee !== ME).sort(byDue);
   const groups = [['Open', mine.filter(t => t.status !== 'done')], ['Completed', mine.filter(t => t.status === 'done')]].filter(g => g[1].length);
   return header('Assigned by me', 'Tasks you created for other people, and where they stand.', `<button class="btn primary" data-act="new-task">${I.plus}Add task</button>`) +
     `<div class="content">${groups.length ? groups.map(([name, list]) => `<div class="section"><div class="section-head">${name}<span class="n">${list.length}</span></div>
@@ -249,8 +265,8 @@ function renderProject() {
 
 function renderTemplates() {
   return header('Templates', 'Start a project with its tasks, subtasks and due dates already filled in.', `<button class="btn primary" data-act="new-template">${I.plus}New template</button>`) +
-    `<div class="content">${S.templates.length ? `<div class="grid-cards">${S.templates.map(tp => `<div class="panel">
-      <span class="tag">${tp.tasks.length} tasks</span><h3>${esc(tp.name)}</h3><p>${esc(tp.desc || '')}</p>
+    `<div class="content">${wsTemplates().length ? `<div class="grid-cards">${wsTemplates().map(tp => `<div class="panel">
+      <span class="tag">${tp.tasks.length} tasks${S.workspaces.length > 1 ? ` · ${tp.workspaceId ? esc(S.workspaces.find(w => w.id === tp.workspaceId)?.name || '') + ' only' : 'Both businesses'}` : ''}</span><h3>${esc(tp.name)}</h3><p>${esc(tp.desc || '')}</p>
       <ul class="tpl-tasks">${tp.tasks.slice(0, 4).map(t => `<li>${esc(t.title)}</li>`).join('')}${tp.tasks.length > 4 ? `<li class="more">and ${tp.tasks.length - 4} more</li>` : ''}</ul>
       <div class="panel-actions"><button class="btn primary sm" data-act="use-template" data-id="${tp.id}">Use template</button>
       <button class="btn sm danger ${ui.armDelete === tp.id ? 'armed' : ''}" data-act="del-template" data-id="${tp.id}">${ui.armDelete === tp.id ? 'Click again to delete' : 'Delete'}</button></div></div>`).join('')}</div>`
@@ -258,7 +274,7 @@ function renderTemplates() {
 }
 
 function renderConnect() {
-  const w = L.widget; const wp = project(w.projectId) || S.projects[0];
+  const w = L.widget; const wp = wsProjects().find(p => p.id === w.projectId) || wsProjects()[0];
   const snippet = `<script src="https://app.your-tasklane.com/widget.js"\n  data-project="${wp ? wp.id : ''}"\n  data-title="${esc(w.title)}"\n  data-color="${w.color}" async><\/script>`;
   const curl = `curl https://app.your-tasklane.com/api/v1/tasks \\\n  -H "Authorization: Bearer ${L.apiKey}" \\\n  -d project=${wp ? wp.id : 'PROJECT_ID'} \\\n  -d title="Update pricing page" \\\n  -d due=${dayStr(7)}`;
   return header('Connect website', 'Let your website send requests in as tasks, and tell other tools when work changes.') + `<div class="content">
@@ -269,7 +285,7 @@ function renderConnect() {
       ${wp ? `<div class="two">
         <div class="panel">
           <div class="form-grid"><label for="w-project">Send requests to</label>
-            <select class="field" id="w-project" data-widget="projectId">${S.projects.map(p => `<option value="${p.id}" ${p.id === wp.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
+            <select class="field" id="w-project" data-widget="projectId">${wsProjects().map(p => `<option value="${p.id}" ${p.id === wp.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
           <div class="form-grid"><label for="w-title">Form heading</label><input class="field" id="w-title" data-widget="title" value="${esc(w.title)}"></div>
           <div class="form-grid"><label>Button color</label><div class="swatches">${COLORS.map(c => `<button class="swatch ${c === w.color ? 'on' : ''}" style="background:${c}" data-act="w-color" data-color="${c}" aria-label="Color ${c}"></button>`).join('')}</div></div>
           <div class="form-grid"><label>Embed code</label><div class="code-wrap"><pre class="code" id="snippet">${esc(snippet)}</pre><button class="btn sm" data-act="copy" data-target="snippet">Copy</button></div></div>
@@ -327,7 +343,7 @@ function renderLayer() {
           <label for="d-status">Status</label><select class="field" id="d-status" data-field="status">${STATUSES.map(([k, n]) => `<option value="${k}" ${k === t.status ? 'selected' : ''}>${n}</option>`).join('')}</select>
           <label for="d-priority">Priority</label><select class="field" id="d-priority" data-field="priority">${['low', 'medium', 'high'].map(k => `<option value="${k}" ${k === t.priority ? 'selected' : ''}>${k[0].toUpperCase() + k.slice(1)}</option>`).join('')}</select>
           ${t.createdBy && person(t.createdBy) ? `<label>Created by</label><span>${esc(person(t.createdBy).name)}</span>` : ''}
-          <label for="d-project">Project</label><select class="field" id="d-project" data-field="projectId"><option value="">No project</option>${S.projects.map(x => `<option value="${x.id}" ${x.id === t.projectId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+          <label for="d-project">Project</label><select class="field" id="d-project" data-field="projectId"><option value="">No project</option>${S.projects.filter(x => x.id === t.projectId || inWs(x.workspaceId)).map(x => `<option value="${x.id}" ${x.id === t.projectId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
         </div>
         <div><div class="block-label"><label for="d-desc">Description</label></div><textarea class="field" id="d-desc" data-field="desc" placeholder="Add details, links or notes…">${esc(t.desc)}</textarea></div>
         <div><div class="block-label">Subtasks <span>${t.subtasks.filter(s => s.done).length}/${t.subtasks.length}</span></div>
@@ -338,25 +354,25 @@ function renderLayer() {
   }
   if (ui.modal === 'project') {
     html += `<div class="modal-wrap" data-act="close-modal-bg"><form class="modal" data-form="project">
-      <h2>New project</h2>
+      <h2>New project${curWs() ? ` <span class="hint">in ${esc(curWs().name)}</span>` : ''}</h2>
       <div class="form-grid"><label for="np-name">Project name</label><input class="field" id="np-name" name="name" required placeholder="e.g. Smith & Co website" value="${esc(ui.modalName || '')}"></div>
       <div class="form-grid"><label>Color</label><div class="swatches">${COLORS.map((c, i) => `<button type="button" class="swatch ${c === (ui.modalColor || COLORS[0]) ? 'on' : ''}" style="background:${c}" data-act="np-color" data-color="${c}" aria-label="Color ${i + 1}"></button>`).join('')}</div></div>
       <div class="form-grid"><label>Start from</label><div class="choice-list">
         <label class="choice"><input type="radio" name="tpl" value="" ${!ui.modalTpl ? 'checked' : ''}><span><b>Blank project</b><small>Add your own tasks</small></span></label>
-        ${S.templates.map(tp => `<label class="choice"><input type="radio" name="tpl" value="${tp.id}" ${ui.modalTpl === tp.id ? 'checked' : ''}><span><b>${esc(tp.name)}</b><small>${tp.tasks.length} tasks · ${esc(tp.desc || '')}</small></span></label>`).join('')}
+        ${wsTemplates().map(tp => `<label class="choice"><input type="radio" name="tpl" value="${tp.id}" ${ui.modalTpl === tp.id ? 'checked' : ''}><span><b>${esc(tp.name)}</b><small>${tp.tasks.length} tasks · ${esc(tp.desc || '')}</small></span></label>`).join('')}
       </div></div>
       <div class="modal-actions"><button type="button" class="btn" data-act="close-modal">Cancel</button><button class="btn primary">Create project</button></div></form></div>`;
   }
   if (ui.modal === 'task') {
     const pid = ui.view === 'project' ? ui.projectId : '';
     html += `<div class="modal-wrap" data-act="close-modal-bg"><form class="modal" data-form="task">
-      <h2>Add task</h2>
+      <h2>Add task${curWs() ? ` <span class="hint">in ${esc(curWs().name)}</span>` : ''}</h2>
       <div class="form-grid"><label for="nk-title">Task</label><input class="field" id="nk-title" name="title" required placeholder="e.g. Update the homepage banner" autocomplete="off"></div>
       <div class="fields">
         <label for="nk-assignee">Assign to</label><select class="field" id="nk-assignee" name="assignee"><option value="">Unassigned</option>${S.people.map(x => `<option value="${x.id}" ${x.id === ME ? 'selected' : ''}>${esc(x.name)}${x.id === ME ? ' (me)' : ''}</option>`).join('')}</select>
         <label for="nk-due">Due date</label><input class="field" type="date" id="nk-due" name="due">
         <label for="nk-priority">Priority</label><select class="field" id="nk-priority" name="priority"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select>
-        <label for="nk-project">Project</label><select class="field" id="nk-project" name="project"><option value="">No project</option>${S.projects.map(x => `<option value="${x.id}" ${x.id === pid ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+        <label for="nk-project">Project</label><select class="field" id="nk-project" name="project"><option value="">No project</option>${wsProjects().map(x => `<option value="${x.id}" ${x.id === pid ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
       </div>
       <div class="form-grid"><label for="nk-desc">Details <span class="hint">(optional)</span></label><textarea class="field" id="nk-desc" name="desc" placeholder="Links, notes or instructions…" style="min-height:70px"></textarea></div>
       <div class="modal-actions"><button type="button" class="btn" data-act="close-modal">Cancel</button><button class="btn primary">Add task</button></div></form></div>`;
@@ -368,6 +384,7 @@ function renderLayer() {
       <div class="form-grid"><label for="nt-desc">Short description</label><input class="field" id="nt-desc" name="desc" placeholder="What is it for?"></div>
       <div class="form-grid"><label for="nt-tasks">Tasks</label><textarea class="field" id="nt-tasks" name="tasks" required style="min-height:150px;font-family:var(--f-mono);font-size:13px" placeholder="Update plugins\n- Back up first\n- Check site after\nReview analytics\nSend report to client"></textarea>
         <p class="hint">One task per line. Start a line with a dash to make it a subtask of the task above it.</p></div>
+      ${S.workspaces.length > 1 ? `<div class="form-grid"><label for="nt-ws">Use for</label><select class="field" id="nt-ws" name="ws"><option value="${ui.workspace}">${esc(curWs()?.name || '')} only</option><option value="">Both businesses</option></select></div>` : ''}
       <div class="modal-actions"><button type="button" class="btn" data-act="close-modal">Cancel</button><button class="btn primary">Save template</button></div></form></div>`;
   }
   if (ui.modal === 'me') {
@@ -385,7 +402,7 @@ function render(keepLayer = false) {
   renderSide();
   const main = document.getElementById('main');
   const scroll = main.scrollTop;
-  if (ui.view === 'project' && !project(ui.projectId)) ui.view = 'home';
+  if (ui.view === 'project' && !wsProjects().some(p => p.id === ui.projectId)) ui.view = 'home';
   main.innerHTML = ui.view === 'project' ? renderProject() : ui.view === 'assigned' ? renderAssigned() : ui.view === 'templates' ? renderTemplates() : ui.view === 'connect' ? renderConnect() : renderHome();
   main.scrollTop = scroll;
   if (!keepLayer) renderLayer();
@@ -394,7 +411,7 @@ function render(keepLayer = false) {
 
 /* ---------- Actions ---------- */
 function addTask(projectId, title, status, extra = {}) {
-  const t = { id: uid(), projectId, title, status, assignee: ME, due: '', priority: 'medium', desc: '', subtasks: [], created: new Date().toISOString(), createdBy: ME, ...extra };
+  const t = { id: uid(), projectId, workspaceId: project(projectId)?.workspaceId || ui.workspace || '', title, status, assignee: ME, due: '', priority: 'medium', desc: '', subtasks: [], created: new Date().toISOString(), createdBy: ME, ...extra };
   S.tasks.push(t); notify('task.created', t); saveTask(t); return t;
 }
 function setStatus(t, status) {
@@ -402,8 +419,8 @@ function setStatus(t, status) {
   if (status === 'done' && was !== 'done') { notify('task.completed', t); toast(`Completed: ${t.title}`); }
 }
 async function createProject(name, color, tp) {
-  const p = { id: uid(), name, color, desc: tp ? `Started from the "${tp.name}" template.` : '' };
-  const tasks = tp ? tp.tasks.map(x => ({ id: uid(), projectId: p.id, title: x.title, status: 'todo', assignee: '', due: x.offset == null ? '' : dayStr(x.offset),
+  const p = { id: uid(), name, color, desc: tp ? `Started from the "${tp.name}" template.` : '', workspaceId: ui.workspace || '' };
+  const tasks = tp ? tp.tasks.map(x => ({ id: uid(), projectId: p.id, workspaceId: p.workspaceId, createdBy: ME, title: x.title, status: 'todo', assignee: '', due: x.offset == null ? '' : dayStr(x.offset),
     priority: x.priority || 'medium', desc: '', subtasks: (x.subtasks || []).map(s => ({ id: uid(), title: s, done: false })), created: new Date().toISOString() })) : [];
   S.projects.push(p); S.tasks.push(...tasks);
   const { error } = await db.from('projects').insert(toProject(p));
@@ -420,6 +437,7 @@ document.addEventListener('click', e => {
     case 'go': ui.view = el.dataset.view; ui.sideOpen = false; ui.openTask = null; break;
     case 'open-project': ui.view = 'project'; ui.projectId = id; ui.sideOpen = false; ui.openTask = null; break;
     case 'menu': ui.sideOpen = true; break;
+    case 'ws': ui.workspace = id; ui.openTask = null; if (ui.view === 'project') ui.view = 'home'; break;
     case 'close-side': ui.sideOpen = false; break;
     case 'mode': ui.mode = el.dataset.mode; break;
     case 'open-task': ui.openTask = id; break;
@@ -442,7 +460,7 @@ document.addEventListener('click', e => {
     case 'del-template': if (ui.armDelete === id) { S.templates = S.templates.filter(x => x.id !== id); ui.armDelete = false; removeTemplate(id); toast('Template deleted'); } else ui.armDelete = id; break;
     case 'save-template': {
       const p = project(ui.projectId); const list = S.tasks.filter(t => t.projectId === p.id);
-      const tp = { id: uid(), name: p.name, desc: `Saved from the ${p.name} project.`, tasks: list.map(t => ({ title: t.title, priority: t.priority, offset: t.due ? Math.max(0, dayDiff(t.due)) : null, subtasks: t.subtasks.map(s => s.title) })) };
+      const tp = { id: uid(), name: p.name, desc: `Saved from the ${p.name} project.`, workspaceId: p.workspaceId, tasks: list.map(t => ({ title: t.title, priority: t.priority, offset: t.due ? Math.max(0, dayDiff(t.due)) : null, subtasks: t.subtasks.map(s => s.title) })) };
       S.templates.push(tp); saveTemplate(tp);
       toast(`Saved "${p.name}" as a template with ${list.length} tasks`); break;
     }
@@ -477,7 +495,6 @@ document.addEventListener('submit', async e => {
     const name = v('name'); if (!name) return; const tpl = S.templates.find(x => x.id === f.elements.tpl.value);
     const p = createProject(name, ui.modalColor || COLORS[0], tpl);
     ui.modal = null; ui.view = 'project'; ui.projectId = S.projects[S.projects.length - 1].id; ui.mode = 'list';
-    if (!project(L.widget.projectId)) L.widget.projectId = ui.projectId;
     toast(tpl ? `Created ${name} with ${tpl.tasks.length} tasks` : `Created ${name}`);
     render(); await p; return;
   }
@@ -494,7 +511,7 @@ document.addEventListener('submit', async e => {
       if (/^[-*•]\s*/.test(l) && tasks.length) tasks[tasks.length - 1].subtasks.push(l.replace(/^[-*•]\s*/, ''));
       else tasks.push({ title: l.replace(/^[-*•]\s*/, ''), priority: 'medium', offset: null, subtasks: [] });
     });
-    const tp = { id: uid(), name: v('name'), desc: v('desc'), tasks };
+    const tp = { id: uid(), name: v('name'), desc: v('desc'), tasks, workspaceId: f.elements.ws ? f.elements.ws.value : '' };
     S.templates.push(tp); saveTemplate(tp);
     ui.modal = null; toast(`Template saved with ${tasks.length} tasks`);
   }
@@ -505,7 +522,7 @@ document.addEventListener('submit', async e => {
   }
   if (kind === 'hook') { L.webhooks.push({ id: uid(), url: v('url'), event: f.elements.event.value }); toast('Notification added'); }
   if (kind === 'widget') {
-    const pid = project(L.widget.projectId) ? L.widget.projectId : S.projects[0].id;
+    const pid = wsProjects().some(p => p.id === L.widget.projectId) ? L.widget.projectId : wsProjects()[0].id;
     addTask(pid, v('msg').split('\n')[0].slice(0, 80), 'todo',
       { assignee: '', priority: 'medium', desc: `Website request from ${v('name')}${v('email') ? ` (${v('email')})` : ''}:\n\n${v('msg')}` });
     f.reset(); toast(`Request added to ${project(pid).name}`);
@@ -518,6 +535,7 @@ document.addEventListener('change', e => {
   if (el.dataset.field) {
     const t = task(ui.openTask); if (!t) return; const k = el.dataset.field;
     if (k === 'status') setStatus(t, el.value); else if (k === 'title') t.title = el.value.trim() || 'Untitled task'; else t[k] = el.value;
+    if (k === 'projectId') t.workspaceId = project(t.projectId)?.workspaceId || t.workspaceId;
     // Typed fields keep the drawer as it is, so a click that caused the blur still lands.
     saveTask(t); render(k === 'title' || k === 'desc'); return;
   }

@@ -8,12 +8,13 @@ A simple task manager for projects and client work, inspired by Asana.
 - Reusable project templates
 - A request form you can embed on a website, plus notifications and an API key (preview)
 
-Tasks are stored in Supabase and shared by everyone on the team, with live updates.
+Each business (IO Web and Website Ninja) has its own workspace with separate projects, tasks and templates; switch between them at the top of the menu. Tasks are stored in Supabase and shared by everyone on the team, with live updates.
 
 ## Files
 
 - `index.html`, `styles.css`, `app.js`: the app, served by GitHub Pages
-- `supabase/setup.sql`: run once in the Supabase SQL Editor to create the tables, security rules and starter templates
+- `supabase/setup.sql`: run once in the Supabase SQL Editor to create everything for a new setup
+- `supabase/002-…`, `003-…`: updates for a database created by an earlier version (run each once, in order)
 
 ## Adding a teammate
 
