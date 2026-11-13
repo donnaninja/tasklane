@@ -47,15 +47,16 @@ if (!L) L = { webhooks: [], apiKey: 'tl_live_' + Math.random().toString(36).slic
 const ui = { view: 'home', projectId: null, mode: 'list', openTask: null, armDelete: false, sideOpen: false, log: [], syncError: '' };
 try { Object.assign(ui, JSON.parse(localStorage.getItem(LOCAL_KEY + '-ui')) || {}); } catch (e) {}
 
-const fromProject = r => ({ id: r.id, name: r.name, color: r.color, desc: r.description || '', workspaceId: r.workspace_id || '' });
+const fromProject = r => ({ id: r.id, name: r.name, color: r.color, desc: r.description || '', workspaceId: r.workspace_id || '', owner: r.owner || '' });
 // workspace_id is only sent once the workspaces database update has been run
 const withWs = (row, id) => S.workspaces.length ? { ...row, workspace_id: id || null } : row;
-const toProject = p => withWs({ id: p.id, name: p.name, color: p.color, description: p.desc || '' }, p.workspaceId);
+// owner is only sent once the email alerts database update has been run
+const toProject = p => withWs({ id: p.id, name: p.name, color: p.color, description: p.desc || '', ...(S.alerts ? { owner: p.owner || null } : {}) }, p.workspaceId);
 const fromTask = r => ({ id: r.id, projectId: r.project_id || '', workspaceId: r.workspace_id || '', createdBy: r.created_by || '', title: r.title, status: r.status, priority: r.priority, assignee: r.assignee || '', due: r.due || '', desc: r.description || '', subtasks: r.subtasks || [], created: r.created_at });
 const toTask = t => withWs({ id: t.id, project_id: t.projectId || null, title: t.title, status: t.status, priority: t.priority, assignee: t.assignee || null, due: t.due || null, description: t.desc || '', subtasks: t.subtasks }, t.workspaceId);
 const fromTemplate = r => ({ id: r.id, name: r.name, desc: r.description || '', tasks: r.tasks || [], workspaceId: r.workspace_id || '' });
 const toTemplate = t => withWs({ id: t.id, name: t.name, description: t.desc || '', tasks: t.tasks }, t.workspaceId);
-const fromPerson = r => ({ id: r.id, name: r.name || r.email || 'Teammate', color: r.color, email: r.email });
+const fromPerson = r => ({ id: r.id, name: r.name || r.email || 'Teammate', color: r.color, email: r.email, alerts: r.email_alerts !== false });
 
 async function loadAll() {
   const [pe, pr, ta, te] = await Promise.all([
@@ -69,7 +70,8 @@ async function loadAll() {
   const ws = await db.from('workspaces').select('*').order('position').order('created_at');
   if (ws.error) console.warn('Workspaces not set up yet', ws.error.message);
   S = { people: pe.data.map(fromPerson), projects: pr.data.map(fromProject), tasks: ta.data.map(fromTask), templates: te.data.map(fromTemplate),
-    workspaces: ws.error ? [] : ws.data.map(r => ({ id: r.id, name: r.name, color: r.color })) };
+    workspaces: ws.error ? [] : ws.data.map(r => ({ id: r.id, name: r.name, color: r.color })),
+    alerts: pe.data.some(r => 'email_alerts' in r) };
   if (S.workspaces.length && !S.workspaces.some(w => w.id === ui.workspace)) ui.workspace = S.workspaces[0].id;
 }
 function syncFailed(error) {
@@ -182,7 +184,7 @@ function renderSide() {
     <div class="side-foot">
       ${ui.syncError ? `<span class="sync err">${esc(ui.syncError)}</span>` : '<span class="sync">Saved for your whole team</span>'}
       <div class="me-row">${avatar(ME)}<b>${esc(me?.name || '')}</b></div>
-      <div class="links"><button class="link-btn" data-act="edit-me">Edit my name</button><button class="link-btn" data-act="sign-out">Sign out</button></div>
+      <div class="links"><button class="link-btn" data-act="edit-me">Edit my profile</button><button class="link-btn" data-act="sign-out">Sign out</button></div>
     </div>`;
 }
 
@@ -260,7 +262,7 @@ function renderProject() {
         <button class="col-add" data-act="quick-add" data-status="${key}">${I.plus}Add task</button></div>`;
     }).join('')}</div></div>`;
   }
-  return header(`<span class="dot" style="background:${esc(p.color)}"></span>${esc(p.name)}`, `${esc(p.desc || '')}${p.desc ? ' · ' : ''}${doneN} of ${tasks.length} done`, actions, tabs) + `<div class="content">${body}</div>`;
+  return header(`<span class="dot" style="background:${esc(p.color)}"></span>${esc(p.name)}`, `${p.owner && person(p.owner) ? `Owner: ${esc(person(p.owner).name)} · ` : ''}${esc(p.desc || '')}${p.desc ? ' · ' : ''}${doneN} of ${tasks.length} done`, actions, tabs) + `<div class="content">${body}</div>`;
 }
 
 function renderTemplates() {
@@ -356,6 +358,8 @@ function renderLayer() {
     html += `<div class="modal-wrap" data-act="close-modal-bg"><form class="modal" data-form="project">
       <h2>New project${curWs() ? ` <span class="hint">in ${esc(curWs().name)}</span>` : ''}</h2>
       <div class="form-grid"><label for="np-name">Project name</label><input class="field" id="np-name" name="name" required placeholder="e.g. Smith & Co website" value="${esc(ui.modalName || '')}"></div>
+      ${S.alerts ? `<div class="form-grid"><label for="np-owner">Owner</label><select class="field" id="np-owner" name="owner">${S.people.map(x => `<option value="${x.id}" ${x.id === (ui.modalOwner || ME) ? 'selected' : ''}>${esc(x.name)}${x.id === ME ? ' (me)' : ''}</option>`).join('')}</select>
+        <p class="hint">The owner gets the template's tasks and an email when someone else creates the project for them.</p></div>` : ''}
       <div class="form-grid"><label>Color</label><div class="swatches">${COLORS.map((c, i) => `<button type="button" class="swatch ${c === (ui.modalColor || COLORS[0]) ? 'on' : ''}" style="background:${c}" data-act="np-color" data-color="${c}" aria-label="Color ${i + 1}"></button>`).join('')}</div></div>
       <div class="form-grid"><label>Start from</label><div class="choice-list">
         <label class="choice"><input type="radio" name="tpl" value="" ${!ui.modalTpl ? 'checked' : ''}><span><b>Blank project</b><small>Add your own tasks</small></span></label>
@@ -390,9 +394,10 @@ function renderLayer() {
   if (ui.modal === 'me') {
     const me = person(ME);
     html += `<div class="modal-wrap" data-act="close-modal-bg"><form class="modal" data-form="me">
-      <h2>Your name</h2><p class="hint">This is how teammates see you on tasks.</p>
+      <h2>Your profile</h2><p class="hint">Your name and color are how teammates see you on tasks.</p>
       <div class="form-grid"><label for="me-name">Name</label><input class="field" id="me-name" name="name" required value="${esc(me?.name || '')}"></div>
       <div class="form-grid"><label>Color</label><div class="swatches">${COLORS.map((c, i) => `<button type="button" class="swatch ${c === (ui.modalColor || me?.color) ? 'on' : ''}" style="background:${c}" data-act="me-color" data-color="${c}" aria-label="Color ${i + 1}"></button>`).join('')}</div></div>
+      ${S.alerts ? `<label class="choice"><input type="checkbox" id="me-alerts" name="alerts" ${(ui.modalAlerts ?? me?.alerts) ? 'checked' : ''}><span><b>Email me when I'm assigned work</b><small>When a teammate gives you a task or a project${me?.email ? `, an email goes to ${esc(me.email)}` : ''}.</small></span></label>` : ''}
       <div class="modal-actions"><button type="button" class="btn" data-act="close-modal">Cancel</button><button class="btn primary">Save</button></div></form></div>`;
   }
   layer.innerHTML = html;
@@ -418,9 +423,9 @@ function setStatus(t, status) {
   const was = t.status; t.status = status;
   if (status === 'done' && was !== 'done') { notify('task.completed', t); toast(`Completed: ${t.title}`); }
 }
-async function createProject(name, color, tp) {
-  const p = { id: uid(), name, color, desc: tp ? `Started from the "${tp.name}" template.` : '', workspaceId: ui.workspace || '' };
-  const tasks = tp ? tp.tasks.map(x => ({ id: uid(), projectId: p.id, workspaceId: p.workspaceId, createdBy: ME, title: x.title, status: 'todo', assignee: '', due: x.offset == null ? '' : dayStr(x.offset),
+async function createProject(name, color, tp, owner = '') {
+  const p = { id: uid(), name, color, desc: tp ? `Started from the "${tp.name}" template.` : '', workspaceId: ui.workspace || '', owner };
+  const tasks = tp ? tp.tasks.map(x => ({ id: uid(), projectId: p.id, workspaceId: p.workspaceId, createdBy: ME, title: x.title, status: 'todo', assignee: owner, due: x.offset == null ? '' : dayStr(x.offset),
     priority: x.priority || 'medium', desc: '', subtasks: (x.subtasks || []).map(s => ({ id: uid(), title: s, done: false })), created: new Date().toISOString() })) : [];
   S.projects.push(p); S.tasks.push(...tasks);
   const { error } = await db.from('projects').insert(toProject(p));
@@ -449,12 +454,12 @@ document.addEventListener('click', e => {
     case 'del-project': if (ui.armDelete === id) { const p = project(id); S.projects = S.projects.filter(x => x.id !== id); S.tasks = S.tasks.filter(t => t.projectId !== id); ui.view = 'home'; ui.armDelete = false; run(db.from('projects').delete().eq('id', id)); toast(`Deleted project: ${p.name}`); } else ui.armDelete = id; break;
     case 'quick-add': { const t = addTask(ui.projectId, 'New task', el.dataset.status); ui.openTask = t.id; render(); const ti = document.getElementById('d-title'); ti.focus(); ti.select(); return; }
     case 'new-project': openModal('project'); render(); document.getElementById('np-name').focus(); return;
-    case 'np-color': { const f = el.closest('form'); ui.modalName = f.elements.name.value; ui.modalTpl = f.elements.tpl.value; ui.modalColor = el.dataset.color; break; }
+    case 'np-color': { const f = el.closest('form'); ui.modalName = f.elements.name.value; if (f.elements.owner) ui.modalOwner = f.elements.owner.value; ui.modalTpl = f.elements.tpl.value; ui.modalColor = el.dataset.color; break; }
     case 'use-template': openModal('project', { modalTpl: id }); render(); document.getElementById('np-name').focus(); return;
     case 'new-task': openModal('task'); render(); document.getElementById('nk-title').focus(); return;
     case 'new-template': openModal('template'); render(); document.getElementById('nt-name').focus(); return;
-    case 'edit-me': openModal('me', { modalColor: person(ME)?.color }); render(); document.getElementById('me-name').focus(); return;
-    case 'me-color': { const f = el.closest('form'); const n = f.elements.name.value; ui.modalColor = el.dataset.color; render(); document.getElementById('me-name').value = n; return; }
+    case 'edit-me': openModal('me', { modalColor: person(ME)?.color, modalAlerts: undefined }); render(); document.getElementById('me-name').focus(); return;
+    case 'me-color': { const f = el.closest('form'); const n = f.elements.name.value; if (f.elements.alerts) ui.modalAlerts = f.elements.alerts.checked; ui.modalColor = el.dataset.color; render(); document.getElementById('me-name').value = n; return; }
     case 'close-modal': ui.modal = null; break;
     case 'close-modal-bg': if (e.target !== el) return; ui.modal = null; break;
     case 'del-template': if (ui.armDelete === id) { S.templates = S.templates.filter(x => x.id !== id); ui.armDelete = false; removeTemplate(id); toast('Template deleted'); } else ui.armDelete = id; break;
@@ -493,9 +498,10 @@ document.addEventListener('submit', async e => {
   if (kind === 'sub') { if (!v('title')) return; const t = task(ui.openTask); t.subtasks.push({ id: uid(), title: v('title'), done: false }); saveTask(t); render(); document.getElementById('d-newsub').focus(); return; }
   if (kind === 'project') {
     const name = v('name'); if (!name) return; const tpl = S.templates.find(x => x.id === f.elements.tpl.value);
-    const p = createProject(name, ui.modalColor || COLORS[0], tpl);
+    const owner = f.elements.owner ? f.elements.owner.value : '';
+    const p = createProject(name, ui.modalColor || COLORS[0], tpl, owner);
     ui.modal = null; ui.view = 'project'; ui.projectId = S.projects[S.projects.length - 1].id; ui.mode = 'list';
-    toast(tpl ? `Created ${name} with ${tpl.tasks.length} tasks` : `Created ${name}`);
+    toast(`Created ${name}${tpl ? ` with ${tpl.tasks.length} tasks` : ''}${owner && owner !== ME ? ` for ${person(owner)?.name}` : ''}`);
     render(); await p; return;
   }
   if (kind === 'task') {
@@ -517,7 +523,8 @@ document.addEventListener('submit', async e => {
   }
   if (kind === 'me') {
     const me = person(ME); me.name = v('name'); me.color = ui.modalColor || me.color;
-    run(db.from('profiles').update({ name: me.name, color: me.color }).eq('id', ME));
+    if (f.elements.alerts) me.alerts = f.elements.alerts.checked;
+    run(db.from('profiles').update({ name: me.name, color: me.color, ...(S.alerts ? { email_alerts: me.alerts } : {}) }).eq('id', ME));
     ui.modal = null; toast('Name saved');
   }
   if (kind === 'hook') { L.webhooks.push({ id: uid(), url: v('url'), event: f.elements.event.value }); toast('Notification added'); }
